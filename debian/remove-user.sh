@@ -2,7 +2,7 @@
 
 set -e
 
-_USERNAME="dev"
+_USERNAME="unkown"
 USERNAME="${1:-$_USERNAME}"
 
 sudo pkill -u "$USERNAME"
