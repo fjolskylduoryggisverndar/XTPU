@@ -12,6 +12,7 @@ AcceptEnv LANG LC_*
 PrintMotd no
 KbdInteractiveAuthentication no
 
+KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,curve25519-sha256
 ChallengeResponseAuthentication no
 PasswordAuthentication no
 PermitRootLogin no
