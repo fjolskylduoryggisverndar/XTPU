@@ -8,11 +8,12 @@ PRI=$(echo "$KEY" | openssl pkey -outform DER | tail -c 32 | base64)
 PUB=$(echo "$KEY" | openssl pkey -pubout -outform DER | tail -c 32 | base64)
 
 WARP_API="https://api.cloudflareclient.com/v0a2077/reg"
+TOS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 RESPONSE=$(curl -sX POST "$WARP_API" \
     -H "Content-Type: application/json" \
     -H 'user-agent: okhttp/4.12.1' \
     -d '{
-        "tos": "'"$(date --utc +"%Y-%m-%dT%H:%M:%S.%3NZ" | awk '{print substr($0, 1, length($0)-1)"-02:00"}')"'",
+        "tos": "'"$TOS"'",
         "key": "'"$PUB"'"
     }')
 
