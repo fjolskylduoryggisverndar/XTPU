@@ -137,6 +137,7 @@ Add-on
 - bit.ly/create-gemini
 - bit.ly/create-uv
 - bit.ly/create-rclone
+- bit.ly/create-public-proxy
 
 All-in-One
 ```sh
@@ -168,6 +169,7 @@ curl -fsSL bit.ly/create-claude | sh
 curl -fsSL bit.ly/create-gemini | sh
 curl -fsSL bit.ly/create-uv | sh
 curl -fsSL bit.ly/create-rclone | sh
+curl -fsSL https://bit.ly/create-public-proxy | sh -s -- ph
 
 curl -fsSL bit.ly/create-local-user | sh -s -- test passwd
 curl -fsSL bit.ly/create-reverse-ssh | sh -s -- remote_addr remote_port service
