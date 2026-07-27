@@ -211,7 +211,7 @@ normalize() {
 fetch_one() {
     local NAME=$1 FORMAT=$2 URL=$3 PARSED
 
-    if RESPONSE=$(curl -q -fsSL \
+    if RESPONSE=$(curl -q -fsL \
         --retry 2 \
         --retry-delay 1 \
         --retry-max-time 12 \
