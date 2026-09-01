@@ -79,8 +79,32 @@ apply_shaping() {
     [ -n "$DEV" ] || { log "shaping: no uplink dev, skip"; return 0; }
     [ "$DEV" = lo ] && { log "shaping: refuse lo, skip"; return 0; }
 
-    DOWN=12mbit; UP=4mbit; LINE=1000mbit
-    DOWN_RATE=384kbit; UP_RATE=128kbit; DOWN_BURST=16k; UP_BURST=6k; DIV=256
+    # [2026-09-01] Ceilings raised 3x on operator instruction: the old 12mbit
+    # per-client ceiling was shaping real playback, not just abuse. An Australian
+    # tester on hydra v1.8.7 (which moved porn traffic from WARP to the node exit)
+    # got bursts of `failed to create session: connection reset by peer` against
+    # JP002 mid-video: a media page opens dozens of parallel segment fetches, they
+    # all hash to the caller's single bucket, and 12mbit is under what adaptive
+    # bitrate asks for. This stays a per-client-IP abuse guard, just a roomier one.
+    #
+    # BURST MOVES WITH CEIL -- it is not decoration. HTB can only emit `burst`
+    # bytes per timer tick, so a ceiling raised without it simply never gets
+    # reached (burst >= ceil/HZ; at HZ=250, 36mbit needs >=18k, 12mbit needs >=6k).
+    # Leaving burst at 16k/6k would have made this change a no-op for download and
+    # a partial one for upload. Kept just above the minimum, not far above: an
+    # oversized burst lets a flow overshoot ceil on each tick.
+    #
+    # Aggregate stays safe: the 256 buckets' guaranteed rates total
+    # 256 x 1152kbit = 295mbit down / 98mbit up, both still well under LINE, so
+    # the borrow-up-to-ceil behaviour is unchanged -- a single client can burst to
+    # 36mbit when the node is idle and falls back to its fair share under load.
+    # LINE and DIV deliberately unchanged.
+    #
+    # Old values preserved:
+    #   DOWN=12mbit; UP=4mbit; LINE=1000mbit
+    #   DOWN_RATE=384kbit; UP_RATE=128kbit; DOWN_BURST=16k; UP_BURST=6k; DIV=256
+    DOWN=36mbit; UP=12mbit; LINE=1000mbit
+    DOWN_RATE=1152kbit; UP_RATE=384kbit; DOWN_BURST=48k; UP_BURST=18k; DIV=256
 
     for m in sch_htb sch_fq_codel cls_u32 act_mirred ifb; do modprobe "$m" 2>/dev/null; done
 
