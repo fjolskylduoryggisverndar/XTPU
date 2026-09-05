@@ -58,7 +58,17 @@ sudo -E apt-get -qq install -o Dpkg::Options::="--force-confold" -y sing-box
 # egress (WARP udp/2408, DNS/53, SSH/22, ACME dns01 which is outbound dport 443
 # with an ephemeral sport) never matches the sport/dport-443 hash and rides the
 # unshaped default class.
-SPECIAL_IPS="191.222.218.103"     # HK001: managed by node-tierlimit (tiered)
+# [v3 2026-09-05] HK001 joins the fleet-wide flat per-IP shaping. Its tiered
+# daily-volume throttle (node-tierlimit) is being retired by hand (see
+# docs/HK001-merge-into-fleet.md); once its apply script loses +x and the nft
+# ledger is gone, the tiered-node probe below no longer matches and this list
+# is what would still exclude it. Emptied so `for sip in $SPECIAL_IPS` iterates
+# zero times. The probe block (node-tierlimit-apply.sh -x / nft table) stays
+# as-is so the ordering is safe either way: HK001 keeps its tiered shaping
+# until the manual steps are done, whatever this file says.
+# Old value preserved:
+#   SPECIAL_IPS="191.222.218.103"     # HK001: managed by node-tierlimit (tiered)
+SPECIAL_IPS=""
 
 apply_shaping() {
     command -v tc >/dev/null 2>&1 || { log "shaping: tc absent, skip"; return 0; }
