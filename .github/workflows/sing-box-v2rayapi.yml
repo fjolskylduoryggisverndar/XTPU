@@ -28,6 +28,11 @@ on:
         required: true
         default: "v1.14.0"
         type: string
+      singbox_commit:
+        description: "[v3 2026-09-05] Upstream commit the tag must resolve to (40-hex). Empty = trust the tag (first build only); set it for every rebuild so a moved tag fails the build instead of shipping different code under the same name."
+        required: false
+        default: ""
+        type: string
       publish:
         description: "Create/update the GitHub Release with the artifacts"
         required: true
@@ -68,6 +73,15 @@ jobs:
           ref: ${{ inputs.singbox_tag }}
           path: sing-box-src
           fetch-depth: 1
+
+      # [added v3 2026-09-05] A tag is mutable; a commit is not. Pin it.
+      - name: Verify the tag resolves to the pinned upstream commit
+        if: ${{ inputs.singbox_commit != '' }}
+        working-directory: sing-box-src
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "tag ${{ inputs.singbox_tag }} -> $actual"
+          [ "$actual" = "${{ inputs.singbox_commit }}" ] || { echo "::error::tag ${{ inputs.singbox_tag }} resolves to $actual, expected ${{ inputs.singbox_commit }}"; exit 1; }
 
       - name: Setup Go (version from upstream go.mod)
         uses: actions/setup-go@v5

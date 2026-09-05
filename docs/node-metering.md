@@ -12,7 +12,7 @@ monthly cap) lives in hydra.
 | sing-box built with `with_v2ray_api` | `/usr/bin/sing-box` (official package diverted to `/usr/bin/sing-box.distrib`) | GitHub Release `sing-box-<tag>-v2rayapi` of this repo, built by `.github/workflows/sing-box-v2rayapi.yml` |
 | `sing-stats` gRPC client (QueryStats, reset) | `/usr/local/bin/sing-stats` | same release, source in `metering/sing-stats/` |
 | `experimental.v2ray_api` block in the config | `/etc/sing-box/config.json` | spliced by Job 4; `stats.users` refreshed by the monitor on every user-list change |
-| metering edition of the monitor | `/usr/local/bin/sing-monitor.sh` (previous copy kept as `.bak-<stamp>`) | `scripts/sing-monitor.sh` = hydra's template verbatim + a `harvest` entry point |
+| metering edition of the monitor | `/usr/local/bin/sing-monitor.sh` (previous copy kept as `.bak-<stamp>`) | `scripts/sing-monitor.sh` = hydra's v1.8.13 template verbatim (the `harvest` entry point is in both since 2026-09-05; only the file header differs) |
 | pending increments + batch sequence | `/var/lib/sing-monitor/pending.json` | written only by the monitor, under its lock |
 | off-switch | `/usr/local/sbin/node-metering-off.sh` | `scripts/node-metering-off.sh` |
 | hold file | `/etc/sing-box/metering.off` | written by the off-switch; while present Job 4 does nothing on this node |

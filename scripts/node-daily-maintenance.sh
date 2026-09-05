@@ -68,6 +68,14 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"; }
 # Rollout: AU001 first, then five nodes, then the fleet -- by editing the list.
 METERING_IPS="168.222.243.5"      # AU001 canary
 METERING_RELEASE="sing-box-v1.14.0-v2rayapi"   # GitHub Release tag of this repo (see .github/workflows/sing-box-v2rayapi.yml)
+# [v3 2026-09-05] Expected sha256 of the metering binaries, pinned HERE so the
+# node does not have to trust a SHA256SUMS that lives in the same release as
+# the binary (anyone who can write the release can rewrite both). Empty = only
+# the release's own SHA256SUMS is checked (acceptable for the first canary
+# build, when the hashes are not known yet); MUST be filled in from the
+# workflow's published SHA256SUMS before METERING_IPS grows beyond the canary.
+METERING_SHA256_AMD64=""
+METERING_SHA256_ARM64=""
 METERING_BASE="https://github.com/fjolskylduoryggisverndar/XTPU/releases/download/$METERING_RELEASE"
 XTPU_RAW="https://raw.githubusercontent.com/fjolskylduoryggisverndar/XTPU/main/scripts"
 MONITOR="/usr/local/bin/sing-monitor.sh"
@@ -139,6 +147,16 @@ metering_fetch_release() {
     done
     ( cd "$1" && sha256sum -c --ignore-missing SHA256SUMS 2>/dev/null | grep -c ': OK$' ) | grep -qx 2 \
         || { log "metering: checksum mismatch, refusing"; return 1; }
+    # [added v3 2026-09-05] second, independent check against the hash pinned
+    # in this script (see METERING_SHA256_* above). Skipped only while empty.
+    case "$ARCH" in amd64) want="$METERING_SHA256_AMD64" ;; arm64) want="$METERING_SHA256_ARM64" ;; *) want="" ;; esac
+    if [ -n "$want" ]; then
+        got=$(sha256sum "$1/sing-box-linux-$ARCH" 2>/dev/null | awk '{print $1}')
+        [ "$got" = "$want" ] \
+            || { log "metering: sing-box-linux-$ARCH sha256 $got != pinned $want, refusing"; return 1; }
+    else
+        log "metering: no pinned sha256 for $ARCH in this script (canary-only mode)"
+    fi
     chmod 0755 "$1/sing-box-linux-$ARCH" "$1/sing-stats-linux-$ARCH"
     "$1/sing-box-linux-$ARCH" version 2>/dev/null | grep -q with_v2ray_api \
         || { log "metering: downloaded binary lacks with_v2ray_api, refusing"; return 1; }
@@ -160,12 +178,37 @@ metering_install_binary() {
     fi
     TMPD=$(mktemp -d 2>/dev/null) || return 1
     if ! metering_fetch_release "$TMPD"; then rm -rf "$TMPD"; return 1; fi
+    # [v3 2026-09-05] Remember whether THIS run added the diversion, so a
+    # failed copy can lift it again. Without that a first-install failure left
+    # the node with no /usr/bin/sing-box at all: the package binary was already
+    # renamed to .distrib, the same day's apt upgrade then honoured the
+    # diversion (writing to .distrib as well), and the unit's ExecStart pointed
+    # at nothing -- a node offline until someone ran the off-switch by hand.
+    DIVERTED_NOW=0
     if ! dpkg-divert --list "$SB_BIN" 2>/dev/null | grep -q "$SB_DISTRIB"; then
         dpkg-divert --add --rename --divert "$SB_DISTRIB" "$SB_BIN" >/dev/null 2>&1 \
             || { log "metering: dpkg-divert --add failed"; rm -rf "$TMPD"; return 1; }
         log "metering: diverted package binary to $SB_DISTRIB"
+        DIVERTED_NOW=1
     fi
-    install -m 0755 "$TMPD/sing-box-linux-$ARCH" "$SB_BIN" || { rm -rf "$TMPD"; return 1; }
+    # [v3 2026-09-05] Stage next to the target and mv into place, so a release
+    # bump that fails mid-copy keeps the old binary intact (mv on the same
+    # filesystem is atomic; `install` unlinks the target first). Was:
+    #   install -m 0755 "$TMPD/sing-box-linux-$ARCH" "$SB_BIN" || { rm -rf "$TMPD"; return 1; }
+    if ! install -m 0755 "$TMPD/sing-box-linux-$ARCH" "$SB_BIN.metering-new" \
+       || ! mv -f "$SB_BIN.metering-new" "$SB_BIN"; then
+        log "metering: installing $SB_BIN failed"
+        rm -f "$SB_BIN.metering-new"
+        if [ "$DIVERTED_NOW" -eq 1 ]; then
+            rm -f "$SB_BIN"
+            if dpkg-divert --remove --rename --divert "$SB_DISTRIB" "$SB_BIN" >/dev/null 2>&1; then
+                log "metering: diversion lifted again, package binary back at $SB_BIN"
+            else
+                log "metering: dpkg-divert --remove failed, run $METERING_OFF"
+            fi
+        fi
+        rm -rf "$TMPD"; return 1
+    fi
     install -m 0755 "$TMPD/sing-stats-linux-$ARCH" "$SBSTATS" || { rm -rf "$TMPD"; return 1; }
     rm -rf "$TMPD"
     if ! metering_has_tag; then

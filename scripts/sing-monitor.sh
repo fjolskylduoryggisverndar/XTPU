@@ -4,19 +4,19 @@
 #
 # VERBATIM copy of the template hydra's provisioner installs at
 # /usr/local/bin/sing-monitor.sh (hydra src/utils/server.rs,
-# install_monitor_script, v1.8.12), so a node provisioned by hydra and a node
+# install_monitor_script, v1.8.13), so a node provisioned by hydra and a node
 # upgraded in place by XTPU's node-daily-maintenance.sh Job 4 run the same
-# script. Keep it that way: when hydra's template changes, re-copy it here and
-# re-apply the single XTPU-only addition below, which is tagged
-# [added v3 2026-09-05] and consists of the `harvest` entry point in main().
+# script. Keep it that way: when hydra's template changes, re-copy it here.
+# [v3 2026-09-05] The `harvest` entry point in main() used to be the one
+# XTPU-only addition; hydra's template now carries the identical lines, so
+# below this header the two files are byte-for-byte the same.
 #
 # Why the entry point: Job 4 must harvest the in-memory per-user counters
 # right before its daily `apt-get install sing-box` (the package postinst
 # restarts the service and zeroes them). `sing-monitor.sh harvest` does only
 # that, under the monitor's own lock, so pending.json is never written by two
-# processes at once. (Invoking the plain hydra template with the same argument
-# is harmless: it ignores $1 and runs a normal heartbeat cycle, which also
-# harvests first.)
+# processes at once. (A pre-v1.8.13 monitor given the same argument is
+# harmless: it ignores $1 and runs a normal heartbeat cycle.)
 #
 # The %PLACEHOLDER% values are substituted at install time. Job 4 copies them
 # out of the previously installed script (hydra rendered them from its own
@@ -42,7 +42,7 @@ cleanup_lock() {
     rm -f "$LOCK_FILE"
 }
 
-# [added v1.8.12 2026-09-05] Per-user traffic metering (hydra account_usage).
+# [added v1.8.13 2026-09-06] Per-user traffic metering (hydra account_usage).
 # The node harvests sing-box's per-user counters through the v2ray_api stats
 # service (QueryStats with reset) using a small gRPC client shipped by the
 # fleet maintenance script (XTPU) as STATS_BIN, merges the deltas into
@@ -97,7 +97,7 @@ ack_pending() {
     sudo mv "$PENDING_TMP" "$PENDING_PATH" 2>/dev/null || return 0
 }
 
-# [changed v1.8.12 2026-09-05] harvests first, then sends pending user deltas
+# [changed v1.8.13 2026-09-06] harvests first, then sends pending user deltas
 # + batch_seq in the same stats body; on a valid reply the pending batch is
 # acknowledged. Old body:
 #   BYTES=$(awk -F'[: ]+' '$2!="lo" && NR>2 {rx+=$3; tx+=$11} END{print rx" "tx}' /proc/net/dev 2>/dev/null || echo "0 0")
@@ -177,7 +177,7 @@ update_config() {
     cp "$CONFIG_PATH" "$CONFIG_BACKUP"
     cp "$USERS_PATH" "$USERS_BACKUP"
 
-    # [changed v1.8.12 2026-09-05] when (and ONLY when) the config already has
+    # [changed v1.8.13 2026-09-06] when (and ONLY when) the config already has
     # an experimental.v2ray_api.stats section, its `users` name list is
     # refreshed from the new inbound users in the same edit, so every member
     # is metered. A config without the section is left exactly as before
@@ -295,9 +295,9 @@ main() {
     check_lock
     echo $$ > "$LOCK_FILE"
 
-    # [added v3 2026-09-05] XTPU-only: `sing-monitor.sh harvest` folds the
-    # current counters into pending.json under the lock and exits. Used by
-    # node-daily-maintenance.sh Job 4 right before the apt upgrade.
+    # [added v1.8.13 2026-09-06] `sing-monitor.sh harvest` folds the current
+    # counters into pending.json under the lock and exits. Used by XTPU's
+    # node-daily-maintenance.sh Job 4 right before anything restarts sing-box.
     if [ "$1" = "harvest" ]; then
         harvest_stats
         exit 0
@@ -338,7 +338,7 @@ main() {
             cp "$SCHEME_BACKUP" "$SCHEME_PATH"
             exit 1
         fi
-        # [added v1.8.12 2026-09-05] the per-user counters live in sing-box's
+        # [added v1.8.13 2026-09-06] the per-user counters live in sing-box's
         # memory and die with the restart: harvest them into pending first.
         harvest_stats
         restart_service || rollback_config

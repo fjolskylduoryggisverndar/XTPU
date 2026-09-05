@@ -35,6 +35,20 @@ log() { printf '[%s] metering-off: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"; }
 # 1. hold
 touch "$HOLD" 2>/dev/null && log "hold file $HOLD written (rm it to let Job 4 re-enable)"
 
+# 1b. [added v3 2026-09-05] harvest before anything below changes what is
+# running or what the monitor can do: the per-user counters live in the
+# metered sing-box's memory (gone at step 5's restart) and only the metering
+# edition of the monitor (replaced at step 4) knows how to read them. Same
+# retry as Job 4's metering_harvest, since the 10s timer may hold the lock.
+if [ -x "$MONITOR" ] && grep -q '^harvest_stats()' "$MONITOR" 2>/dev/null; then
+    n=0
+    while [ "$n" -lt 3 ]; do
+        "$MONITOR" harvest >/dev/null 2>&1 && { log "counters harvested into pending.json"; break; }
+        n=$((n+1)); sleep 2
+    done
+    [ "$n" -lt 3 ] || log "harvest did not succeed (lock busy?), continuing anyway"
+fi
+
 # 2. binary
 if dpkg-divert --list "$SB_BIN" 2>/dev/null | grep -q "$SB_DISTRIB"; then
     mkdir -p "$(dirname "$SB_KEEP")" 2>/dev/null
