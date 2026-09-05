@@ -74,8 +74,9 @@ METERING_RELEASE="sing-box-v1.14.0-v2rayapi"   # GitHub Release tag of this repo
 # the release's own SHA256SUMS is checked (acceptable for the first canary
 # build, when the hashes are not known yet); MUST be filled in from the
 # workflow's published SHA256SUMS before METERING_IPS grows beyond the canary.
-METERING_SHA256_AMD64=""
-METERING_SHA256_ARM64=""
+# [v3 2026-09-06] was: METERING_SHA256_AMD64="" (canary-only mode, hashes unknown before the first build)
+METERING_SHA256_AMD64="7e90787bf1a9a74a6882dfb86ce3de693e2529c643966aab3308386ef1d924bb"
+METERING_SHA256_ARM64="607634f3fb706cb4b5df8cc3e005048869dcfa2d4aff16179b4ba131e97c838c"
 METERING_BASE="https://github.com/fjolskylduoryggisverndar/XTPU/releases/download/$METERING_RELEASE"
 XTPU_RAW="https://raw.githubusercontent.com/fjolskylduoryggisverndar/XTPU/main/scripts"
 MONITOR="/usr/local/bin/sing-monitor.sh"
