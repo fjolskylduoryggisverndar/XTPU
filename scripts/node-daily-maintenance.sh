@@ -11,6 +11,7 @@
 #   1. Keep sing-box current from the upstream apt repo (what the old script did).
 #   2. Apply per-client-IP fair-share shaping (anti-abuse). [added v2 2026-08]
 #   3. Re-sync the ACME certificate credential from the API.
+#   4. Per-user byte metering (canary rollout; runs BEFORE 1). [added v3 2026-09-05]
 #
 # Why (3) exists: /v1/server/config is fetched exactly once, by the installer.
 # Nodes provisioned before the Cloudflare token was rotated still hold the
@@ -31,6 +32,258 @@ BACKUP="/etc/sing-box/config.json.maint-backup"
 SAGER_NET="https://sing-box.app/gpg.key"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"; }
+
+# ── 4. Per-user byte metering (canary) ────────────────────────────────────────
+# [added v3 2026-09-05] Numbered 4 because it was added last, but it runs FIRST:
+# Job 1's daily `apt-get install sing-box` triggers the package postinst, which
+# restarts the service and zeroes sing-box's in-memory traffic counters, so the
+# counters must be harvested before Job 1 gets its turn.
+#
+# What it does on a node whose public IP is in METERING_IPS:
+#   * every run: harvest the per-user counters into pending.json via the
+#     monitor script (`sing-monitor.sh harvest`, under the monitor's own lock);
+#   * first run (and whenever the pinned release changes): install a sing-box
+#     built with the with_v2ray_api tag (official apt build lacks it) at
+#     /usr/bin/sing-box behind a dpkg-divert, so tomorrow's apt upgrade lands
+#     in /usr/bin/sing-box.distrib instead of clobbering it; install sing-stats;
+#     splice `experimental.v2ray_api` into the config with the inbound user
+#     names (name == account id) as the counted users; install the metering
+#     edition of sing-monitor.sh (old copy kept as .bak-<stamp>); check;
+#     restart;
+#   * not in the list (or hold file present) but still metered: run the
+#     off-switch, so removing an IP from the list below == rollback.
+#
+# Fail-open at every step: any failure leaves the node exactly as it was for
+# that step. Two traps this guards against explicitly:
+#   * FREEZE TRAP: the official binary plus a config with a v2ray_api block =>
+#     `sing-box check` fails forever, and the 10s monitor then never applies a
+#     user-list change again. So the build-tag gate (`sing-box version` must
+#     print with_v2ray_api) runs BEFORE the block is spliced in, and a config
+#     that has the block while the binary lacks the tag gets the block stripped.
+#   * DIVERT-MISS: if the package's binary is not /usr/bin/sing-box or the unit
+#     does not exec that path, the diversion would protect nothing; both are
+#     checked with dpkg -L / systemctl cat before the first install (not
+#     verifiable from the repo, hence the canary).
+#
+# Rollout: AU001 first, then five nodes, then the fleet -- by editing the list.
+METERING_IPS="168.222.243.5"      # AU001 canary
+METERING_RELEASE="sing-box-v1.14.0-v2rayapi"   # GitHub Release tag of this repo (see .github/workflows/sing-box-v2rayapi.yml)
+METERING_BASE="https://github.com/fjolskylduoryggisverndar/XTPU/releases/download/$METERING_RELEASE"
+XTPU_RAW="https://raw.githubusercontent.com/fjolskylduoryggisverndar/XTPU/main/scripts"
+MONITOR="/usr/local/bin/sing-monitor.sh"
+SBSTATS="/usr/local/bin/sing-stats"                 # STATS_BIN in sing-monitor.sh
+METERING_OFF="/usr/local/sbin/node-metering-off.sh"
+METERING_HOLD="/etc/sing-box/metering.off"           # written by the off-switch; rm to re-enable
+METERING_STATE="/var/lib/sing-monitor/metering.release"
+SB_BIN="/usr/bin/sing-box"
+SB_DISTRIB="/usr/bin/sing-box.distrib"
+V2RAY_LISTEN="127.0.0.1:10085"                       # the monitor reads .experimental.v2ray_api.listen back from the config
+
+metering_harvest() {
+    # Only the metering edition of the monitor knows `harvest`; the pre-metering
+    # script would run a full heartbeat cycle with "harvest" as $1, harmless but
+    # pointless. Retry a few times: the 10s timer may hold the lock right now.
+    [ -x "$MONITOR" ] && grep -q '^harvest_stats()' "$MONITOR" 2>/dev/null || return 0
+    n=0
+    while [ "$n" -lt 3 ]; do
+        "$MONITOR" harvest >/dev/null 2>&1 && { log "metering: harvested"; return 0; }
+        n=$((n+1)); sleep 2
+    done
+    log "metering: harvest skipped (monitor busy), <=10s of counters may be lost"
+    return 0
+}
+
+metering_has_tag() {
+    "$SB_BIN" version 2>/dev/null | grep -q with_v2ray_api
+}
+
+metering_config_has_block() {
+    jq -e '.experimental.v2ray_api != null' "$CONFIG" >/dev/null 2>&1
+}
+
+metering_strip_block() {
+    metering_config_has_block || return 0
+    cp "$CONFIG" "$BACKUP" || return 0
+    NEW=$(jq 'del(.experimental.v2ray_api) | if .experimental == {} then del(.experimental) else . end' "$CONFIG" 2>/dev/null)
+    [ -n "$NEW" ] || return 0
+    printf '%s' "$NEW" > "$CONFIG.new" && [ -s "$CONFIG.new" ] || { rm -f "$CONFIG.new"; return 0; }
+    if sing-box check -c "$CONFIG.new" >/dev/null 2>&1; then
+        mv "$CONFIG.new" "$CONFIG" && systemctl restart sing-box && log "metering: v2ray_api block stripped (binary lacks the tag), restarted"
+    else
+        rm -f "$CONFIG.new"; log "metering: stripped candidate failed check, config left alone"
+    fi
+    return 0
+}
+
+metering_install_offswitch() {
+    TMPOFF=$(mktemp 2>/dev/null) || return 0
+    if curl -fsSL --max-time 30 -o "$TMPOFF" "$XTPU_RAW/node-metering-off.sh" 2>/dev/null \
+       && grep -q '^# node-metering-off.sh' "$TMPOFF" && sh -n "$TMPOFF" 2>/dev/null; then
+        install -m 0755 "$TMPOFF" "$METERING_OFF" 2>/dev/null
+    fi
+    rm -f "$TMPOFF"
+    return 0
+}
+
+# Download release assets for this arch into $1, verify SHA256SUMS, and prove
+# the candidate binary carries the tag before anything on the node is touched.
+metering_fetch_release() {
+    case "$(uname -m)" in
+        x86_64)  ARCH=amd64 ;;
+        aarch64) ARCH=arm64 ;;
+        *) log "metering: unsupported arch $(uname -m), skip"; return 1 ;;
+    esac
+    for f in "sing-box-linux-$ARCH" "sing-stats-linux-$ARCH" SHA256SUMS; do
+        curl -fsSL --max-time 300 -o "$1/$f" "$METERING_BASE/$f" 2>/dev/null \
+            || { log "metering: download of $f failed"; return 1; }
+    done
+    ( cd "$1" && sha256sum -c --ignore-missing SHA256SUMS 2>/dev/null | grep -c ': OK$' ) | grep -qx 2 \
+        || { log "metering: checksum mismatch, refusing"; return 1; }
+    chmod 0755 "$1/sing-box-linux-$ARCH" "$1/sing-stats-linux-$ARCH"
+    "$1/sing-box-linux-$ARCH" version 2>/dev/null | grep -q with_v2ray_api \
+        || { log "metering: downloaded binary lacks with_v2ray_api, refusing"; return 1; }
+    return 0
+}
+
+metering_install_binary() {
+    # Already on the pinned release and carrying the tag: nothing to do.
+    if [ "$(cat "$METERING_STATE" 2>/dev/null)" = "$METERING_RELEASE" ] && metering_has_tag; then
+        return 0
+    fi
+    # First install only: the diversion must actually cover the binary the
+    # unit runs, otherwise the official package would keep winning.
+    if ! dpkg-divert --list "$SB_BIN" 2>/dev/null | grep -q "$SB_DISTRIB"; then
+        dpkg -L sing-box 2>/dev/null | grep -qx "$SB_BIN" \
+            || { log "metering: package does not own $SB_BIN, skip (verify on canary)"; return 1; }
+        systemctl cat sing-box 2>/dev/null | grep -q "^ExecStart=$SB_BIN" \
+            || { log "metering: unit ExecStart is not $SB_BIN, skip (verify on canary)"; return 1; }
+    fi
+    TMPD=$(mktemp -d 2>/dev/null) || return 1
+    if ! metering_fetch_release "$TMPD"; then rm -rf "$TMPD"; return 1; fi
+    if ! dpkg-divert --list "$SB_BIN" 2>/dev/null | grep -q "$SB_DISTRIB"; then
+        dpkg-divert --add --rename --divert "$SB_DISTRIB" "$SB_BIN" >/dev/null 2>&1 \
+            || { log "metering: dpkg-divert --add failed"; rm -rf "$TMPD"; return 1; }
+        log "metering: diverted package binary to $SB_DISTRIB"
+    fi
+    install -m 0755 "$TMPD/sing-box-linux-$ARCH" "$SB_BIN" || { rm -rf "$TMPD"; return 1; }
+    install -m 0755 "$TMPD/sing-stats-linux-$ARCH" "$SBSTATS" || { rm -rf "$TMPD"; return 1; }
+    rm -rf "$TMPD"
+    if ! metering_has_tag; then
+        # Should be impossible after the pre-install gate; undo everything.
+        log "metering: installed binary lacks the tag, reverting diversion"
+        rm -f "$SB_BIN"
+        dpkg-divert --remove --rename --divert "$SB_DISTRIB" "$SB_BIN" >/dev/null 2>&1
+        return 1
+    fi
+    PREV_RELEASE=$(cat "$METERING_STATE" 2>/dev/null)
+    mkdir -p "$(dirname "$METERING_STATE")" 2>/dev/null
+    printf '%s' "$METERING_RELEASE" > "$METERING_STATE"
+    log "metering: installed $METERING_RELEASE at $SB_BIN (arch $ARCH)"
+    # Release bump on an already-metered node: the file changed but the old
+    # process is still running. First install needs no restart here -- the
+    # config splice that follows restarts anyway.
+    if [ -n "$PREV_RELEASE" ] && [ "$PREV_RELEASE" != "$METERING_RELEASE" ]; then
+        metering_harvest
+        systemctl restart sing-box && log "metering: restarted onto $METERING_RELEASE"
+    fi
+    return 0
+}
+
+# Install the metering edition of sing-monitor.sh, carrying over the seven
+# %PLACEHOLDER% values hydra rendered into the current copy (API host, paths).
+# Idempotent: nothing happens when the rendered candidate equals what is there.
+metering_install_monitor() {
+    [ -s "$MONITOR" ] || { log "metering: no $MONITOR, skip monitor install"; return 1; }
+    TMPM=$(mktemp 2>/dev/null) || return 1
+    curl -fsSL --max-time 30 -o "$TMPM" "$XTPU_RAW/sing-monitor.sh" 2>/dev/null \
+        && grep -q '^harvest_stats()' "$TMPM" && grep -q '%API_SERVER%' "$TMPM" \
+        || { log "metering: monitor download failed"; rm -f "$TMPM"; return 1; }
+    for k in API_SERVER CONFIG_PATH USERS_PATH SCHEME_PATH TEMP_USERS TEMP_SCHEME LOCK_FILE; do
+        v=$(sed -n "s/^$k=\"\(.*\)\"$/\1/p" "$MONITOR" | head -n1)
+        [ -n "$v" ] || { log "metering: $k not found in current monitor, skip"; rm -f "$TMPM"; return 1; }
+        case "$v" in *'|'*|*'%'*|*'&'*) log "metering: unusable $k value, skip"; rm -f "$TMPM"; return 1 ;; esac
+        sed "s|%$k%|$v|g" "$TMPM" > "$TMPM.r" && mv "$TMPM.r" "$TMPM" || { rm -f "$TMPM" "$TMPM.r"; return 1; }
+    done
+    # Only the seven real placeholders: a generic %X% pattern would false-match
+    # the template's own ${BYTES%% *} expansion.
+    if grep -q '%\(API_SERVER\|CONFIG_PATH\|USERS_PATH\|SCHEME_PATH\|TEMP_USERS\|TEMP_SCHEME\|LOCK_FILE\)%' "$TMPM"; then
+        log "metering: unrendered placeholder, skip"; rm -f "$TMPM"; return 1
+    fi
+    dash -n "$TMPM" 2>/dev/null || { log "metering: candidate monitor fails dash -n, skip"; rm -f "$TMPM"; return 1; }
+    if cmp -s "$TMPM" "$MONITOR"; then rm -f "$TMPM"; return 0; fi
+    cp "$MONITOR" "$MONITOR.bak-$(date +%Y%m%d%H%M%S)" || { rm -f "$TMPM"; return 1; }
+    install -m 0755 "$TMPM" "$MONITOR" && log "metering: monitor script updated (previous kept as .bak-*)"
+    rm -f "$TMPM"
+    return 0
+}
+
+# Splice (or refresh) experimental.v2ray_api. Only after the tag gate passed.
+metering_splice_block() {
+    WANT=$(jq -c --arg l "$V2RAY_LISTEN" '{listen: $l, stats: {enabled: true, users: [.inbounds[0].users[]? | select(.name != null) | .name]}}' "$CONFIG" 2>/dev/null)
+    [ -n "$WANT" ] || return 0
+    HAVE=$(jq -c '.experimental.v2ray_api // empty' "$CONFIG" 2>/dev/null)
+    [ "$WANT" = "$HAVE" ] && return 0
+    cp "$CONFIG" "$BACKUP" || return 0
+    NEW=$(jq --argjson v "$WANT" '.experimental.v2ray_api = $v' "$CONFIG" 2>/dev/null)
+    [ -n "$NEW" ] || return 0
+    printf '%s' "$NEW" > "$CONFIG.new" && [ -s "$CONFIG.new" ] || { rm -f "$CONFIG.new"; return 0; }
+    if ! sing-box check -c "$CONFIG.new" >/dev/null 2>&1; then
+        rm -f "$CONFIG.new"; log "metering: config with v2ray_api failed check, left alone"; return 0
+    fi
+    metering_harvest
+    mv "$CONFIG.new" "$CONFIG" || return 0
+    if systemctl restart sing-box; then
+        log "metering: v2ray_api block applied on $V2RAY_LISTEN, restarted"
+    else
+        log "metering: restart failed, rolling the config back"
+        cp "$BACKUP" "$CONFIG"; systemctl restart sing-box
+    fi
+    return 0
+}
+
+apply_metering() {
+    for c in jq curl dpkg-divert systemctl sha256sum install; do
+        command -v "$c" >/dev/null 2>&1 || { log "metering: $c absent, skip"; return 0; }
+    done
+    [ -f "$CONFIG" ] || { log "metering: no config, skip"; return 0; }
+
+    MYIP=$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null)
+    [ -n "$MYIP" ] || { log "metering: cannot learn public IP, skip"; return 0; }
+    WANTED=0
+    for mip in $METERING_IPS; do [ "$MYIP" = "$mip" ] && WANTED=1; done
+    [ -f "$METERING_HOLD" ] && WANTED=0
+
+    # Every run, first thing: counters out of memory before anything restarts.
+    metering_harvest
+
+    if [ "$WANTED" -eq 0 ]; then
+        if [ -f "$METERING_STATE" ] && [ -x "$METERING_OFF" ]; then
+            log "metering: $MYIP no longer in the list, running off-switch"
+            "$METERING_OFF" >/dev/null 2>&1 || log "metering: off-switch reported failure"
+        elif metering_config_has_block && ! metering_has_tag; then
+            metering_strip_block   # freeze-trap escape, whatever left it behind
+        fi
+        return 0
+    fi
+
+    metering_install_offswitch
+    metering_install_binary
+    # Gate on what is actually at /usr/bin/sing-box now, not on whether the
+    # install above succeeded: an already-metered node whose download failed
+    # today still runs a tagged binary and must keep its block.
+    metering_has_tag || { metering_strip_block; return 0; }
+    metering_install_monitor
+    # Count only once something on the node harvests: with the pre-metering
+    # monitor still in place the counters would just pile up in memory until
+    # Job 1's apt restart zeroes them.
+    if grep -q '^harvest_stats()' "$MONITOR" 2>/dev/null; then
+        metering_splice_block
+    else
+        log "metering: monitor lacks harvest support, block not enabled yet"
+    fi
+    return 0
+}
+apply_metering
 
 # ── 1. sing-box package update (unchanged behaviour) ──────────────────────────
 sudo -E apt-get -qq update

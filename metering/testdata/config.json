@@ -1,0 +1,22 @@
+{
+  "log": {"level": "info"},
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "in",
+      "listen": "127.0.0.1",
+      "listen_port": 18080,
+      "users": [
+        {"username": "test-user-a", "password": "pw-a"},
+        {"username": "test-user-b", "password": "pw-b"}
+      ]
+    }
+  ],
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:10085",
+      "stats": {"enabled": true, "users": ["test-user-a", "test-user-b"]}
+    }
+  }
+}

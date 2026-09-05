@@ -1,0 +1,175 @@
+# Build sing-box from an upstream tag with the with_v2ray_api build tag, plus
+# the sing-stats gRPC client, and publish both as a GitHub Release.
+#
+# Why this exists: per-user byte metering on the nodes needs sing-box's
+# experimental.v2ray_api StatsService, and the official apt package is built
+# without with_v2ray_api. Upstream source is NOT modified: we check out the
+# tag as-is and only add the build tag. Nodes install the result via
+# dpkg-divert (see scripts/node-daily-maintenance.sh, Job 4), so the official
+# package can keep upgrading underneath without clobbering it.
+#
+# Build tags: release/DEFAULT_BUILD_TAGS_OTHERS (+ with_v2ray_api). That is
+# upstream's own tag set for its CGO_ENABLED=0 linux builds; it equals
+# DEFAULT_BUILD_TAGS minus with_naive_outbound, which needs the Chromium/cronet
+# toolchain (hours of CI, cgo). No node config uses a naive outbound (nodes
+# run anytls inbound + direct/wireguard outbounds), so nothing is lost.
+#
+# Outputs (release tag `sing-box-<tag>-v2rayapi`):
+#   sing-box-linux-amd64, sing-box-linux-arm64, sing-stats-linux-amd64,
+#   sing-stats-linux-arm64, SHA256SUMS
+# The node script pins the release tag and verifies SHA256SUMS before use.
+name: sing-box v2ray_api build
+
+on:
+  workflow_dispatch:
+    inputs:
+      singbox_tag:
+        description: "Upstream sing-box git tag to build (e.g. v1.14.0)"
+        required: true
+        default: "v1.14.0"
+        type: string
+      publish:
+        description: "Create/update the GitHub Release with the artifacts"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.singbox_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build linux/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      SINGBOX_TAG: ${{ inputs.singbox_tag }}
+      GOOS: linux
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: "0"
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Checkout XTPU
+        uses: actions/checkout@v4
+        with:
+          path: xtpu
+
+      - name: Checkout upstream sing-box at tag (source untouched)
+        uses: actions/checkout@v4
+        with:
+          repository: SagerNet/sing-box
+          ref: ${{ inputs.singbox_tag }}
+          path: sing-box-src
+          fetch-depth: 1
+
+      - name: Setup Go (version from upstream go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sing-box-src/go.mod
+          check-latest: true
+          cache-dependency-path: |
+            sing-box-src/go.sum
+            xtpu/metering/sing-stats/go.sum
+
+      - name: Build sing-box with with_v2ray_api
+        working-directory: sing-box-src
+        run: |
+          set -euo pipefail
+          VERSION="${SINGBOX_TAG#v}"
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS),with_v2ray_api"
+          LDFLAGS_SHARED="$(cat release/LDFLAGS)"
+          echo "version=${VERSION} tags=${TAGS}"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          go build -v -trimpath \
+            -o "$GITHUB_WORKSPACE/dist/sing-box-linux-${GOARCH}" \
+            -tags "${TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+            ./cmd/sing-box
+
+      - name: Build sing-stats against the same checkout
+        working-directory: xtpu/metering/sing-stats
+        run: |
+          set -euo pipefail
+          # Point the module at the exact tree we just built so the stub and
+          # the server can never drift apart. Local edit only, never committed.
+          go mod edit -replace "github.com/sagernet/sing-box=$GITHUB_WORKSPACE/sing-box-src"
+          go mod tidy
+          go build -v -trimpath \
+            -o "$GITHUB_WORKSPACE/dist/sing-stats-linux-${GOARCH}" \
+            -ldflags "-s -w -buildid=" .
+
+      # Native smoke test on the amd64 runner: the build tag must show up in
+      # `sing-box version` (that line is the install gate on the nodes), the
+      # config with an experimental.v2ray_api block must pass `check` (it is
+      # what a tag-less binary rejects), and sing-stats must complete a real
+      # QueryStats round-trip against the running binary.
+      - name: Smoke test (amd64 only)
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          SB="$GITHUB_WORKSPACE/dist/sing-box-linux-amd64"
+          ST="$GITHUB_WORKSPACE/dist/sing-stats-linux-amd64"
+          chmod +x "$SB" "$ST"
+          "$SB" version
+          "$SB" version | grep -q with_v2ray_api
+          CFG="$GITHUB_WORKSPACE/xtpu/metering/testdata/config.json"
+          "$SB" check -c "$CFG"
+          "$SB" run -c "$CFG" >/tmp/sb.log 2>&1 &
+          SBPID=$!
+          sleep 2
+          OUT=$("$ST" -listen 127.0.0.1:10085 -reset)
+          echo "sing-stats: $OUT"
+          printf '%s' "$OUT" | grep -q '^{'
+          kill "$SBPID" || true
+          cat /tmp/sb.log
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    env:
+      SINGBOX_TAG: ${{ inputs.singbox_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          chmod +x sing-box-linux-* sing-stats-linux-*
+          sha256sum sing-box-linux-amd64 sing-box-linux-arm64 sing-stats-linux-amd64 sing-stats-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update release
+        run: |
+          set -euo pipefail
+          REL="sing-box-${SINGBOX_TAG}-v2rayapi"
+          NOTES="sing-box ${SINGBOX_TAG} built from the untouched upstream tag with release/DEFAULT_BUILD_TAGS_OTHERS plus with_v2ray_api (CGO_ENABLED=0), and the sing-stats QueryStats client built against the same checkout. Consumed by scripts/node-daily-maintenance.sh Job 4 (metering); verify with SHA256SUMS."
+          if gh release view "$REL" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$REL" -R "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$REL" -R "$GITHUB_REPOSITORY" \
+              --title "$REL" --notes "$NOTES" dist/*
+          fi
