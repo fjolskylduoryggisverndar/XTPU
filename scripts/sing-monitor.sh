@@ -116,7 +116,20 @@ ack_pending() {
 #   printf '%s' "$DECODED" > "$TEMP_USERS"
 fetch_users() {
     harvest_stats
-    BYTES=$(awk -F'[: ]+' '$2!="lo" && NR>2 {rx+=$3; tx+=$11} END{print rx" "tx}' /proc/net/dev 2>/dev/null || echo "0 0")
+    # [v3 2026-09-06] printf "%.0f", not print. Debian's default awk is mawk
+    # 1.3.4, which prints an integer above 2^31 in scientific notation
+    # (2147483648 -> "2.14748e+09"). hydra parses the stats body into i64, the
+    # whole body fails to deserialise, and endpoints/global/server.rs drops it
+    # with .ok() -- silently, no log, heartbeat still 200. So every node's
+    # rx/tx froze just under 2^31 once its uptime traffic passed ~2.1 GB, and
+    # with them day_bytes/week_bytes, i.e. every node-level quota. Measured
+    # 2026-09-06: 33 of 48 nodes stuck at 2,147,4xx,xxx; the three that were
+    # fine had gawk installed by hand. printf "%d" is NOT a fix -- mawk clamps
+    # that to 2147483647, which is worse. "%.0f" goes through the double path
+    # and is exact to 2^53 (9 PB), verified on AU001 against python reading
+    # the same /proc/net/dev. Was:
+    #   BYTES=$(awk -F'[: ]+' '$2!="lo" && NR>2 {rx+=$3; tx+=$11} END{print rx" "tx}' /proc/net/dev 2>/dev/null || echo "0 0")
+    BYTES=$(awk -F'[: ]+' '$2!="lo" && NR>2 {rx+=$3; tx+=$11} END{printf "%.0f %.0f\n", rx, tx}' /proc/net/dev 2>/dev/null || echo "0 0")
     RX=${BYTES%% *}; TX=${BYTES##* }
     CONNS=$(ss -H state established '( sport = :443 )' 2>/dev/null | wc -l 2>/dev/null || echo 0)
     LOAD1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0); NCPU=$(nproc 2>/dev/null || echo 1)
