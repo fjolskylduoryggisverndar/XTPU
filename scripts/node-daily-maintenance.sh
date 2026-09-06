@@ -66,7 +66,12 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"; }
 #     verifiable from the repo, hence the canary).
 #
 # Rollout: AU001 first, then five nodes, then the fleet -- by editing the list.
-METERING_IPS="168.222.243.5"      # AU001 canary
+# [v3 2026-09-06] was: METERING_IPS="168.222.243.5"      # AU001 canary
+# Canary verified on AU001 (with_v2ray_api binary live, stats listener on
+# 127.0.0.1:10085, 19 users in the stats list, pending.json ticking every 10s).
+# HK002 added next: it is the only pay-per-GB node in the fleet (Zenlayer,
+# $0.017/GB both directions), so per-user metering matters there first.
+METERING_IPS="168.222.243.5 64.205.176.209"      # AU001 canary + HK002 (Zenlayer, metered)
 METERING_RELEASE="sing-box-v1.14.0-v2rayapi"   # GitHub Release tag of this repo (see .github/workflows/sing-box-v2rayapi.yml)
 # [v3 2026-09-05] Expected sha256 of the metering binaries, pinned HERE so the
 # node does not have to trust a SHA256SUMS that lives in the same release as
