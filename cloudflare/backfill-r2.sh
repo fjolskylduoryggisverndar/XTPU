@@ -18,13 +18,13 @@ BRANDS='buddhajump BuddhaJumpApp/buddhajump-ci buddhajump
 kamevpn fjolskylduoryggisverndar/kamevpn-ci kamevpn
 00000vpn fjolskylduoryggisverndar/00000vpn-ci vpn00000
 88888vpn fjolskylduoryggisverndar/88888vpn-ci vpn88888
-goddessvpn BuddhaJumpApp/goddessvpn-ci goddessvpn
-openbridge BuddhaJumpApp/openbridge-ci openbridge
-libertygate BuddhaJumpApp/libertygate-ci libertygate
-maskaura BuddhaJumpApp/maskaura-ci maskaura
-aiglefree BuddhaJumpApp/aiglefree-ci aiglefree
-maschvpn BuddhaJumpApp/maschvpn-ci maschvpn
-ninjashield BuddhaJumpApp/ninjashield-ci ninjashield'
+goddessvpn fjolskylduoryggisverndar/goddessvpn-ci goddessvpn
+openbridge fjolskylduoryggisverndar/openbridge-ci openbridge
+libertygate fjolskylduoryggisverndar/libertygate-ci libertygate
+maskaura fjolskylduoryggisverndar/maskaura-ci maskaura
+aiglefree fjolskylduoryggisverndar/aiglefree-ci aiglefree
+maschvpn fjolskylduoryggisverndar/maschvpn-ci maschvpn
+ninjashield fjolskylduoryggisverndar/ninjashield-ci ninjashield'
 
 ctype() { case "$1" in android) echo application/vnd.android.package-archive;; windows) echo application/zip;; macos) echo application/x-apple-diskimage;; esac; }
 asset_name() { case "$1" in android) echo "$2-android-universal-$3.apk";; windows) echo "$2-windows-amd64-$3.zip";; macos) echo "$2-macos-$3.dmg";; esac; }

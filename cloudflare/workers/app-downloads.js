@@ -49,31 +49,31 @@ const TABLE = {
     backup: { android: "https://bit.ly/45B621d", windows: "https://bit.ly/4wHPpNm" },
   },
   "aiglefree.xyz": {
-    app: "aiglefree", repo: "BuddhaJumpApp/aiglefree-ci", prefix: "aiglefree", pin: "v1.1.2+10",
+    app: "aiglefree", repo: "fjolskylduoryggisverndar/aiglefree-ci", prefix: "aiglefree", pin: "v1.1.2+10",
     backup: { android: null, windows: null },
   },
   "goddessv.xyz": {
-    app: "goddessvpn", repo: "BuddhaJumpApp/goddessvpn-ci", prefix: "goddessvpn", pin: "v1.1.2+11",
+    app: "goddessvpn", repo: "fjolskylduoryggisverndar/goddessvpn-ci", prefix: "goddessvpn", pin: "v1.1.2+11",
     backup: { android: null, windows: "https://bit.ly/3UaOuGE" },
   },
   "libertygatevpn.xyz": {
-    app: "libertygate", repo: "BuddhaJumpApp/libertygate-ci", prefix: "libertygate", pin: "v1.1.2+10",
+    app: "libertygate", repo: "fjolskylduoryggisverndar/libertygate-ci", prefix: "libertygate", pin: "v1.1.2+10",
     backup: { android: null, windows: "https://bit.ly/4wfHOoo" },
   },
   "maschvpn.xyz": {
-    app: "maschvpn", repo: "BuddhaJumpApp/maschvpn-ci", prefix: "maschvpn", pin: "v1.1.2+10",
+    app: "maschvpn", repo: "fjolskylduoryggisverndar/maschvpn-ci", prefix: "maschvpn", pin: "v1.1.2+10",
     backup: { android: null, windows: null },
   },
   "maskaura.xyz": {
-    app: "maskaura", repo: "BuddhaJumpApp/maskaura-ci", prefix: "maskaura", pin: "v1.1.2+11",
+    app: "maskaura", repo: "fjolskylduoryggisverndar/maskaura-ci", prefix: "maskaura", pin: "v1.1.2+11",
     backup: { android: null, windows: "https://bit.ly/4fC6aU3" },
   },
   "ninjashield.xyz": {
-    app: "ninjashield", repo: "BuddhaJumpApp/ninjashield-ci", prefix: "ninjashield", pin: "v1.1.2+10",
+    app: "ninjashield", repo: "fjolskylduoryggisverndar/ninjashield-ci", prefix: "ninjashield", pin: "v1.1.2+10",
     backup: { android: null, windows: null },
   },
   "openbridgeapp.xyz": {
-    app: "openbridge", repo: "BuddhaJumpApp/openbridge-ci", prefix: "openbridge", pin: "v1.1.2+11",
+    app: "openbridge", repo: "fjolskylduoryggisverndar/openbridge-ci", prefix: "openbridge", pin: "v1.1.2+11",
     backup: { android: null, windows: null },
   },
   // The 00000/88888 CI jobs name their assets vpn00000-*/vpn88888-*, not 00000vpn-*.
