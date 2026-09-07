@@ -1,0 +1,91 @@
+# [2026-09-07] R2 publish step for the *-ci workflows.
+#
+# Drop this step into build-android.yml (after "Upload APK to GitHub release"),
+# build-windows.yml (after the portable-zip release upload) and build-apple.yml
+# (after "Build notarized DMG", macOS matrix leg only). It uploads the artifact
+# to the fjolsky-downloads R2 bucket under <app>/<tag>/<file>, refreshes the
+# per-platform manifest <app>/latest/<platform>.json that the fjolsky-downloads
+# Worker reads, and then PRUNES older tags so the bucket stays inside the R2
+# free tier (10 GB-month): only the two newest tags per app are kept.
+# The GitHub-release upload stays as-is; R2 is additive.
+#
+# Uses the R2 REST API through curl -- no wrangler, no npm on the runner.
+#
+# Repo secrets to add to every *-ci repo (same values everywhere):
+#   CLOUDFLARE_ACCOUNT_ID   72b71eab72f53b1f1e80ea435d40d9e1
+#   CLOUDFLARE_R2_TOKEN     token scoped to "Workers R2 Storage: Edit" ONLY
+#                           (keychain fjosky.cloudflare.r2ci) -- not the admin token
+#   R2_BUCKET               fjolsky-downloads
+#
+# Inputs the step expects from its workflow (already present in all three):
+#   inputs.version   vX.Y.Z+BUILD  = the release tag
+# and set by the calling step:
+#   R2_APP     brand slug used by the Worker TABLE (buddhajump, 00000vpn, ...) --
+#              NOT inputs.name (which is vpn00000 for 00000vpn). Derive it in
+#              build.yml's check-for-version job from PRIVATE_REPO ("owner/<slug>")
+#              and pass it down, or set a repo variable R2_APP.
+#   PLATFORM   android | windows | macos
+#   FILE       the artifact path that was just uploaded to the GitHub release
+#
+# continue-on-error: a Cloudflare hiccup must not fail a release; the Worker
+# falls back to the GitHub release for that platform until the next build.
+
+      - name: Publish to R2 (dl.<brand> direct downloads)
+        if: ${{ env.FILE != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_R2_TOKEN: ${{ secrets.CLOUDFLARE_R2_TOKEN }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          APP: ${{ env.R2_APP }}
+          TAG: ${{ inputs.version }}
+          KEEP_TAGS: "2"
+        run: |
+          set -euo pipefail
+          if [ -z "${CF_R2_TOKEN:-}" ] || [ -z "${APP:-}" ]; then echo "R2 not configured (secret or R2_APP missing); skipping."; exit 0; fi
+          case "$PLATFORM" in
+            android) CT=application/vnd.android.package-archive;;
+            windows) CT=application/zip;;
+            macos)   CT=application/x-apple-diskimage;;
+            *) echo "unknown PLATFORM=$PLATFORM"; exit 0;;
+          esac
+          API="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/r2/buckets/$R2_BUCKET"
+          enc() { python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe="/"))' "$1"; }
+          NAME=$(basename "$FILE"); KEY="$APP/$TAG/$NAME"
+          SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE")
+          SHA=$( (sha256sum "$FILE" 2>/dev/null || shasum -a 256 "$FILE") | cut -d' ' -f1)
+          # 1) the bytes
+          curl -fsS -X PUT "$API/objects/$(enc "$KEY")" -H "Authorization: Bearer $CF_R2_TOKEN" -H "Content-Type: $CT" --upload-file "$FILE" -m 1200 >/dev/null
+          # 2) the per-platform manifest the Worker reads
+          printf '{"tag":"%s","key":"%s","size":%s,"sha256":"%s","content_type":"%s","published_at":"%s","source":"github-actions %s"}\n' \
+            "$TAG" "$KEY" "$SIZE" "$SHA" "$CT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GITHUB_RUN_ID" > manifest.json
+          curl -fsS -X PUT "$API/objects/$(enc "$APP/latest/$PLATFORM.json")" -H "Authorization: Bearer $CF_R2_TOKEN" -H "Content-Type: application/json" --upload-file manifest.json >/dev/null
+          echo "R2: $KEY ($((SIZE/1048576)) MB) + $APP/latest/$PLATFORM.json"
+          # 3) prune: keep only the KEEP_TAGS newest tags under <app>/ (by upload time)
+          curl -fsS "$API/objects?prefix=$(enc "$APP/")&per_page=1000" -H "Authorization: Bearer $CF_R2_TOKEN" > listing.json
+          python3 - "$APP" "$TAG" "$KEEP_TAGS" <<'EOF' > to_delete.txt
+          import json,sys,collections
+          app,newtag,keep=sys.argv[1],sys.argv[2],int(sys.argv[3])
+          objs=json.load(open("listing.json")).get("result",[])
+          bytag=collections.defaultdict(list); newest={}
+          for o in objs:
+              k=o["key"]; parts=k.split("/")
+              if len(parts)<3 or parts[1]=="latest": continue
+              tag=parts[1]; bytag[tag].append(k); newest[tag]=max(newest.get(tag,""),o.get("uploaded",""))
+          newest[newtag]="9999"  # the tag we just wrote is always kept
+          order=sorted(bytag,key=lambda t:newest[t],reverse=True)
+          for t in order[keep:]:
+              for k in bytag[t]: print(k)
+          EOF
+          while read -r k; do
+            [ -z "$k" ] && continue
+            curl -fsS -X DELETE "$API/objects/$(enc "$k")" -H "Authorization: Bearer $CF_R2_TOKEN" >/dev/null && echo "pruned $k"
+          done < to_delete.txt
+
+# Notes for wiring:
+# - The listing endpoint returns at most 1000 keys per page; with ~3 objects per
+#   tag and 2 tags kept that is never reached.
+# - Manifests under <app>/latest/ are rewritten on every release and never pruned.
+# - If the bucket must be emptied for a brand, delete the manifests first: the
+#   Worker then falls back to GitHub immediately instead of 404ing.
