@@ -144,7 +144,16 @@ fetch_users() {
         ''|*[!0-9]*) BATCH_SEQ=0 ;;
     esac
     STATS=$(printf '{"rx":%s,"tx":%s,"conns":%s,"load1":%s,"ncpu":%s,"users":%s,"batch_seq":%s}' "${RX:-0}" "${TX:-0}" "${CONNS:-0}" "${LOAD1:-0}" "${NCPU:-1}" "$USERS_DELTA" "$BATCH_SEQ")
-    RESPONSE=$(curl -sSX POST -H 'Content-Type: application/json' --data "$STATS" "$API_SERVER/users")
+    # [v1.8.19 2026-09-09] curl timeouts. Without them a TCP/TLS hang to the
+    # Cloudflare edge held this oneshot for curl's 300s default, the 10s timer
+    # could not fire meanwhile, and hydra reaped the node for exactly that
+    # (>300s without a /users poll). Measured on DE002/003/004 (MassiveGrid
+    # Frankfurt): 54-91 reaps per node per week, most gaps 301-330s. A poll
+    # normally takes ~1s for ~3 KB; 30s is generous and the next tick retries.
+    # Existing nodes get the same flags from XTPU node-daily-maintenance.sh
+    # (job 5). Was:
+    #   RESPONSE=$(curl -sSX POST -H 'Content-Type: application/json' --data "$STATS" "$API_SERVER/users")
+    RESPONSE=$(curl --connect-timeout 10 --max-time 30 -sSX POST -H 'Content-Type: application/json' --data "$STATS" "$API_SERVER/users")
     DECODED=$(printf '%s' "$RESPONSE" | jq -r '.data.config' | base64 -d)
     if [ -z "$DECODED" ]; then
         return 1
@@ -160,7 +169,9 @@ fetch_users() {
 }
 
 fetch_scheme() {
-    RESPONSE=$(curl -sSX POST "$API_SERVER/scheme")
+    # [v1.8.19 2026-09-09] same timeouts as fetch_users. Was:
+    #   RESPONSE=$(curl -sSX POST "$API_SERVER/scheme")
+    RESPONSE=$(curl --connect-timeout 10 --max-time 30 -sSX POST "$API_SERVER/scheme")
     DECODED=$(printf '%s' "$RESPONSE" | jq -r '.data.config')
     if [ -z "$DECODED" ] || [ "$DECODED" = "null" ]; then
         return 1

@@ -12,6 +12,7 @@
 #   2. Apply per-client-IP fair-share shaping (anti-abuse). [added v2 2026-08]
 #   3. Re-sync the ACME certificate credential from the API.
 #   4. Per-user byte metering (canary rollout; runs BEFORE 1). [added v3 2026-09-05]
+#   5. Poller curl timeouts (runs after 4, before 1). [added v4 2026-09-09]
 #
 # Why (3) exists: /v1/server/config is fetched exactly once, by the installer.
 # Nodes provisioned before the Cloudflare token was rotated still hold the
@@ -333,6 +334,50 @@ apply_metering() {
     return 0
 }
 apply_metering
+
+# ── 5. Poller curl timeouts ───────────────────────────────────────────────────
+# [added v4 2026-09-09] sing-monitor.sh's heartbeat curls had NO timeout, so one
+# TCP/TLS hang to the Cloudflare edge held the oneshot for curl's 300s default,
+# the 10s timer could not fire meanwhile, and hydra reaped the node for exactly
+# that: >300s without a /users poll, then a "back online" on the next success.
+# Measured on DE002/003/004 (MassiveGrid Frankfurt, lossy path to the FRA edge):
+# 54-91 reaps per node in 7 days, most heartbeat gaps 301-330s; AU001 with the
+# identical script: 2 in 30 days. A poll normally takes ~1s for ~3 KB, so
+# 10s connect / 30s total is generous, and the 10s timer retries after it.
+#
+# This patches whatever edition of sing-monitor.sh is installed (the
+# pre-metering template still on most nodes, or the metering edition from this
+# repo, which now carries the flags at the source -- as does hydra's template
+# for newly provisioned nodes). Only lines that invoke the poller
+# (`curl -sSX POST`) and lack --max-time are touched; comment lines (the
+# metering edition keeps an "Old body" copy) are skipped so history stays
+# verbatim. Idempotent, syntax-gated with dash -n, previous copy kept as
+# .bak-<stamp>, fail-open like everything else here. Replacing the file via
+# install(1) gives it a new inode, so a heartbeat run in progress keeps
+# executing its already-open copy.
+POLL_CURL_OPTS="--connect-timeout 10 --max-time 30"
+ensure_poller_timeouts() {
+    [ -s "$MONITOR" ] || { log "timeouts: no $MONITOR, skip"; return 0; }
+    # `-sSX POST` (not `curl -sSX POST`): once patched, the flags sit between
+    # `curl` and `-sSX`, and this presence check must still recognise the file.
+    grep -q -- '-sSX POST' "$MONITOR" 2>/dev/null || { log "timeouts: no poller curl lines in $MONITOR, skip"; return 0; }
+    # Every live poller line already has a timeout => nothing to do (quiet).
+    if ! grep -v '^[[:space:]]*#' "$MONITOR" | grep -- '-sSX POST' | grep -qv -- '--max-time'; then
+        return 0
+    fi
+    TMPT=$(mktemp 2>/dev/null) || { log "timeouts: mktemp failed, skip"; return 0; }
+    sed -e '/^[[:space:]]*#/b' -e '/curl -sSX POST/!b' -e '/--max-time/b' \
+        -e "s/curl -sSX POST/curl $POLL_CURL_OPTS -sSX POST/" "$MONITOR" > "$TMPT" 2>/dev/null \
+        || { rm -f "$TMPT"; log "timeouts: sed failed, skip"; return 0; }
+    [ -s "$TMPT" ] || { rm -f "$TMPT"; log "timeouts: empty candidate, skip"; return 0; }
+    dash -n "$TMPT" 2>/dev/null || { rm -f "$TMPT"; log "timeouts: candidate fails dash -n, skip"; return 0; }
+    if cmp -s "$TMPT" "$MONITOR"; then rm -f "$TMPT"; return 0; fi
+    cp "$MONITOR" "$MONITOR.bak-$(date +%Y%m%d%H%M%S)" || { rm -f "$TMPT"; log "timeouts: backup failed, skip"; return 0; }
+    install -m 0755 "$TMPT" "$MONITOR" && log "timeouts: poller curl now runs with $POLL_CURL_OPTS (previous kept as .bak-*)"
+    rm -f "$TMPT"
+    return 0
+}
+ensure_poller_timeouts
 
 # ── 1. sing-box package update (unchanged behaviour) ──────────────────────────
 sudo -E apt-get -qq update
