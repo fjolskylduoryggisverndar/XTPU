@@ -42,14 +42,15 @@ deploy() {
     | python3 -c 'import sys,json; d=json.load(sys.stdin); print("deployed" if d.get("success") else "ERROR " + str(d.get("errors"))); sys.exit(0 if d.get("success") else 1)'
 }
 
-# [2026-09-12] The first deploy with the Analytics Engine binding came back
-# 403 from the keychain token (Workers Scripts:Edit only). Rather than fail
-# the whole deploy, fall back to R2-only: the Worker guards every
-# `env.REFERRAL_CLICKS` use, so downloads keep working and only the click
-# counts are missing until the token gets the Analytics Engine permission.
+# [2026-09-12] The deploy with the Analytics Engine binding is refused with
+# Cloudflare error 10089 "You need to enable Analytics Engine" until the
+# account owner enables it once in the dashboard (Workers & Pages -> Analytics
+# Engine). Rather than fail the whole deploy, fall back to R2-only: the Worker
+# guards every `env.REFERRAL_CLICKS` use, so downloads keep working and only
+# the click counts are missing. Re-run this script after enabling it.
 if ! deploy "${BINDINGS}"; then
   if [ "${WITH_ANALYTICS}" = "1" ]; then
-    echo "retrying without the Analytics Engine binding (token lacks the permission?)"
+    echo "retrying without the Analytics Engine binding (Analytics Engine not enabled on the account?)"
     deploy "{\"type\":\"r2_bucket\",\"name\":\"DOWNLOADS\",\"bucket_name\":\"${R2_BUCKET}\"}"
   else
     exit 1
@@ -72,12 +73,15 @@ done
 
 # Smoke test: root must 404, a code must render, each platform must answer
 # with the R2 headers (x-fjolsky-source: r2) -- a 302 means the bucket has no
-# manifest and the request fell back to dl.<brand>.
+# manifest and the request fell back to dl.<brand>. A freshly bound hostname
+# answers 000 (TLS handshake fails) for a minute or two while Cloudflare issues
+# its certificate; that is not a deploy failure, so curl errors are tolerated
+# here (`|| true`) -- just re-run the loop.
 for d in ${POOL_DOMAINS}; do
-  printf "%-20s /            " "$d"; curl -s -o /dev/null -m 15 -w "%{http_code}\n" "https://${d}/"
-  printf "%-20s /ABC123      " "$d"; curl -s -o /dev/null -m 15 -w "%{http_code} %{content_type}\n" "https://${d}/ABC123"
+  printf "%-20s /            " "$d"; curl -s -o /dev/null -m 15 -w "%{http_code}\n" "https://${d}/" || true
+  printf "%-20s /ABC123      " "$d"; curl -s -o /dev/null -m 15 -w "%{http_code} %{content_type}\n" "https://${d}/ABC123" || true
   for p in android windows macos; do
     printf "%-20s /ABC123/%-7s" "$d" "$p"
-    curl -sI -m 15 "https://${d}/ABC123/${p}" | awk 'BEGIN{c="";s="-";l="-"} /^HTTP/{c=$2} tolower($1)=="x-fjolsky-source:"{s=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s src=%s len=%s\n", c, s, l}'
+    (curl -sI -m 15 "https://${d}/ABC123/${p}" || true) | awk 'BEGIN{c="000";s="-";l="-"} /^HTTP/{c=$2} tolower($1)=="x-fjolsky-source:"{s=$2} tolower($1)=="content-length:"{l=$2} END{printf "%s src=%s len=%s\n", c, s, l}'
   done
 done
