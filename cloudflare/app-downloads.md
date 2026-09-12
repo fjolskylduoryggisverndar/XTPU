@@ -27,6 +27,10 @@ host is what actually gets blocked. Overrides for debugging:
 
     ?direct=1   skip the mirror, go straight to GitHub
     ?mirror=1   use the second mirror in the list
+    ?ref=CODE   [2026-09-12] count this download against referral code CODE (six alphanumerics;
+                the official site adds it after a /r/<CODE> visit). Bytes served are identical;
+                the response echoes x-fjolsky-ref. Rows land in fjolsky_referral_clicks, see
+                app-referral.md "Click / download counts".
 
 [2026-09-07] Since the R2 change below, the mirror chain is only the FALLBACK
 path; the flags above still work and `?src=github` forces that path.

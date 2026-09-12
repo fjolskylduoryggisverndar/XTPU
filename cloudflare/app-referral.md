@@ -82,3 +82,12 @@ curl -s "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/analytics_e
 
 This is the first rung of the referral funnel (click → download). Install → guest account →
 bound referral code is the client/hydra attribution work, not this Worker.
+
+**[2026-09-12] The official sites feed the same dataset.** `https://<site>/r/<CODE>` is now
+redirected by each site's `_redirects` to `/?ref=<CODE>#download`; the homepage shows the code
+with a copy button and appends `?ref=<CODE>` to its `dl.<brand>` download links, and the
+`fjolsky-downloads` Worker (workers/app-downloads.js) writes a `download` row for every plain
+GET that carries a valid code (HEAD and Range requests are not counted). Same blob order;
+`blob6 host` is `dl.<brand>` for that channel versus a pool domain for the short links, and
+`blob7 lang` there is the raw `Accept-Language` primary tag rather than the landing-page
+language. There is no `view` row for the official site (it is a static Pages site).

@@ -118,6 +118,57 @@ const TAG_TTL = 600;
 // briefly at the edge so a download burst is one R2 read, not thousands.
 const MANIFEST_TTL = 60;
 
+// [2026-09-12 referral-ref] `?ref=<CODE>` marks a download that came through a
+// referral link: the official site appends it to every dl.* link when it was
+// opened via /r/<CODE> (the link the app hands out). One data point per counted
+// download goes to the same Analytics Engine dataset the fjolsky-referral
+// Worker writes (fjolsky_referral_clicks; the blob order IS the schema, see
+// app-referral.md) -- blob6 host = dl.<brand> tells the two channels apart.
+// Only a plain GET counts: HEAD probes and Range continuations would count the
+// same download several times. Analytics must never break a download: the
+// REFERRAL_CLICKS binding is optional and every use is guarded. The response
+// echoes the accepted code as x-fjolsky-ref so the wiring can be checked with
+// curl -I. Codes are six alphanumerics (hydra affiliate codes).
+const CODE_RE = /^[0-9A-Za-z]{6}$/;
+
+function referralCode(url) {
+  const raw = (url.searchParams.get("ref") || "").trim();
+  return CODE_RE.test(raw) ? raw.toUpperCase() : "";
+}
+
+function primaryLang(request) {
+  const header = (request.headers.get("accept-language") || "").toLowerCase();
+  return header.split(",")[0].split(";")[0].trim().slice(0, 16);
+}
+
+function track(env, request, fields) {
+  try {
+    if (!env || !env.REFERRAL_CLICKS) return;
+    env.REFERRAL_CLICKS.writeDataPoint({
+      indexes: [fields.code],
+      blobs: [
+        fields.brand,
+        fields.code,
+        fields.event,                       // "download" (this Worker never serves a "view")
+        fields.platform || "",
+        (request.cf && request.cf.country) || "",
+        fields.host,
+        fields.lang || "",
+      ],
+      doubles: [1],
+    });
+  } catch (_) {
+    // analytics must never break a download
+  }
+}
+
+function withRefHeader(response, code) {
+  if (!code) return response;
+  const r = new Response(response.body, response);   // Response.redirect() headers are immutable
+  r.headers.set("x-fjolsky-ref", code);
+  return r;
+}
+
 // Resolve the newest release tag by reading the redirect GitHub serves for
 // /releases/latest. The result is cached at the edge so a burst of downloads
 // costs one lookup, and any failure returns null so the caller can fall back to
@@ -264,10 +315,17 @@ export default {
         `<p><code>${platform}</code> is not available. Try <a href="/android">android</a>, <a href="/windows">windows</a> or <a href="/macos">macos</a>.</p>`);
     }
 
+    // [2026-09-12 referral-ref] count the download against its referral code, if any.
+    const ref = referralCode(url);
+    if (ref && request.method === "GET" && !request.headers.get("range")) {
+      track(env, request, { brand: entry.app, code: ref, event: "download", platform, host: url.hostname, lang: primaryLang(request) });
+    }
+
     // ?backup=1 uses the old bit.ly link, kept as a censorship fallback.
     if (url.searchParams.get("backup") === "1") {
       const b = entry.backup[platform];
-      if (b) return Response.redirect(b, 302);
+      // [2026-09-12 referral-ref] was: if (b) return Response.redirect(b, 302);
+      if (b) return withRefHeader(Response.redirect(b, 302), ref);
       return page(404, "No backup link", `<p>There is no bit.ly backup for ${entry.app} ${platform}.</p>`);
     }
 
@@ -276,7 +334,8 @@ export default {
       const manifest = await r2Manifest(env, entry, platform, request, ctx);
       if (manifest) {
         const served = await r2Serve(env, manifest, platform, request);
-        if (served) return served;
+        // [2026-09-12 referral-ref] was: if (served) return served;
+        if (served) return withRefHeader(served, ref);
         // Manifest points at a key that is gone -- fall through to GitHub rather
         // than 404, and let the operator notice via the index page.
       }
@@ -292,6 +351,7 @@ export default {
     const idx = Number(url.searchParams.get("mirror") || 0);
     const dest = direct ? target : (MIRRORS[idx] || MIRRORS[0])(target);
 
-    return Response.redirect(dest, 302);
+    // [2026-09-12 referral-ref] was: return Response.redirect(dest, 302);
+    return withRefHeader(Response.redirect(dest, 302), ref);
   },
 };
