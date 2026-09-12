@@ -33,12 +33,28 @@ if [ "${WITH_ANALYTICS}" = "1" ]; then
   BINDINGS="${BINDINGS},{\"type\":\"analytics_engine\",\"name\":\"REFERRAL_CLICKS\",\"dataset\":\"${DATASET}\"}"
 fi
 
-curl -fsS -X PUT \
-  "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}" \
-  -H "Authorization: Bearer ${CF_TOKEN}" \
-  -F "metadata={\"main_module\":\"index.js\",\"compatibility_date\":\"2026-08-04\",\"bindings\":[${BINDINGS}]};type=application/json" \
-  -F "index.js=@${SRC};filename=index.js;type=application/javascript+module" \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("deployed" if d.get("success") else d.get("errors"))'
+deploy() {
+  curl -sS -X PUT \
+    "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/scripts/${SCRIPT_NAME}" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
+    -F "metadata={\"main_module\":\"index.js\",\"compatibility_date\":\"2026-08-04\",\"bindings\":[$1]};type=application/json" \
+    -F "index.js=@${SRC};filename=index.js;type=application/javascript+module" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print("deployed" if d.get("success") else "ERROR " + str(d.get("errors"))); sys.exit(0 if d.get("success") else 1)'
+}
+
+# [2026-09-12] The first deploy with the Analytics Engine binding came back
+# 403 from the keychain token (Workers Scripts:Edit only). Rather than fail
+# the whole deploy, fall back to R2-only: the Worker guards every
+# `env.REFERRAL_CLICKS` use, so downloads keep working and only the click
+# counts are missing until the token gets the Analytics Engine permission.
+if ! deploy "${BINDINGS}"; then
+  if [ "${WITH_ANALYTICS}" = "1" ]; then
+    echo "retrying without the Analytics Engine binding (token lacks the permission?)"
+    deploy "{\"type\":\"r2_bucket\",\"name\":\"DOWNLOADS\",\"bucket_name\":\"${R2_BUCKET}\"}"
+  else
+    exit 1
+  fi
+fi
 
 # Apex hostnames straight onto the Worker (Cloudflare "custom domains": the DNS
 # record and certificate are managed for us; nothing else may live on the apex).
